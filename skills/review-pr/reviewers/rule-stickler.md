@@ -4,7 +4,7 @@ slug: rules
 emoji: "📋"
 order: 50
 enabled: true
-feeds: minor
+feeds: material
 role: compliance with repo rule docs
 ---
 

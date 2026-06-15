@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Multi-agent review of a GitHub or Azure DevOps PR. Build project context first, spawn a roster of specialist reviewers (defined as files under reviewers/ - doomsayer, positive, code-quality nitpicker, architect, rule stickler by default) in parallel, synthesize a verdict, then open a tabbed HTML report for a human reviewer. Supports a re-review mode when paired with `/action-feedback` output. Trigger when the user asks for a PR review, says "review this PR", "can you review", "give feedback on this PR", or shares a github.com or dev.azure.com PR URL and asks for thoughts.
+description: Multi-agent review of a GitHub or Azure DevOps PR. Build project context first, spawn a roster of specialist reviewers (defined as files under reviewers/ - doomsayer, positive, code-quality nitpicker, architect, rule stickler, independent reviewer by default) in parallel, synthesize a verdict graded by severity tiers, then open a tabbed HTML report for a human reviewer. Supports a re-review mode when paired with `/action-feedback` output. Trigger when the user asks for a PR review, says "review this PR", "can you review", "give feedback on this PR", or shares a github.com or dev.azure.com PR URL and asks for thoughts.
 argument-hint: <pr-url-or-number>
 ---
 
@@ -33,7 +33,7 @@ Step 7  Write reports + synthesis.json, run assemble.py, open the report
 Step 8  Wait for the human; offer to post a comment; clean up
 ```
 
-The reviewer roster is **data, not hard-coded**: each reviewer is a file under `~/.claude/skills/review-pr/reviewers/`. The default roster is **doomsayer**, **positive reviewer**, **code-quality nitpicker**, **architect**, and **rule stickler**. They run in parallel and each forms an independent view. See the "Reviewer roster" section near the end for the file format and how to add/disable one.
+The reviewer roster is **data, not hard-coded**: each reviewer is a file under `~/.claude/skills/review-pr/reviewers/`. The default roster is **doomsayer**, **positive reviewer**, **code-quality nitpicker**, **architect**, **rule stickler**, and **independent reviewer**. They run in parallel and each forms an independent view. The **independent reviewer** is special: it is spawned with NO project context (no agent memory, no external notes/knowledge base, no project brief) so it reviews with genuinely fresh eyes - see Step 5.3 and the "Reviewer roster" section for how that works. See that section near the end for the file format and how to add/disable one.
 
 The main agent does NOT read the PR diff until Step 6. Steps 3-5 are deliberately diff-blind so the subagents form independent views and the synthesis isn't anchored by an early read.
 
@@ -134,13 +134,18 @@ If anything is genuinely ambiguous after Step 3 (unfamiliar stack, undocumented 
 **Shared envelope** (prepend to every reviewer's role brief, verbatim intent):
 - The PR identifier (`<org>/<repo>#<N>`) and URL
 - The local clone path (so they can read surrounding files), or a note that no clone is available
-- Your Step 3-4 project understanding (paste it; don't paraphrase to one line)
-- An explicit instruction to fetch the diff themselves and read surrounding files in the local clone where useful. **GitHub:** tell them to run `gh pr view` + `gh pr diff`. **Azure DevOps:** subagents can't use `gh` and shouldn't juggle tokens - instead give them the clone path plus the two commit SHAs (`target` and `source` from the PR JSON, already fetched into the clone in Step 2) and tell them to run `git -C <clone> diff <targetSha> <sourceSha>` for the diff. This keeps you (main agent) diff-blind until Step 6 while still letting each reviewer self-serve.
-- A request for a markdown report, ~500 words, structured with `##`/`###` headings and bullet lists, with quoted `file:line` where applicable. The report is shown **verbatim** in this reviewer's own tab, so it must read well standalone.
+- Your Step 3-4 project understanding (paste it; don't paraphrase to one line). **EXCEPTION - the independent reviewer:** if the reviewer's file has `independent: true` in its frontmatter, do NOT paste your project understanding and do NOT hand it any agent memory, external notes, or knowledge-base context. Instead tell it plainly: "No project brief is provided on purpose. Build your own understanding from the repo (you may read the diff, the source, and in-repo docs like README/CLAUDE.md), but do not consult any external notes, memory, or vault." Its file body already states the cold-eyes constraints; the envelope just withholds the context the others get.
+- An explicit instruction to fetch the diff themselves and read surrounding files in the local clone where useful. **GitHub:** tell them to run `gh pr view` + `gh pr diff`. **Azure DevOps:** subagents can't use `gh` and shouldn't juggle tokens - instead give them the clone path plus the two commit SHAs (`target` and `source` from the PR JSON, already fetched into the clone in Step 2) and tell them to run the merge-base (three-dot) diff `git -C <clone> diff <targetSha>...<sourceSha>` for the diff. **Use three dots, not two** - a two-dot `diff <targetSha> <sourceSha>` includes target-branch commits the feature lacks (reversed) whenever the branch is behind its target, polluting the diff; the three-dot form diffs from the merge-base so it shows only what the PR introduces. This keeps you (main agent) diff-blind until Step 6 while still letting each reviewer self-serve.
+- **Severity tiering (every reviewer).** Tell each reviewer to assign one tier to every issue it raises, with a one-line justification:
+  - **Blocking** - a correctness bug, security hole, data loss, broken build/tests, or an approach that should not merge as-is. Concrete, demonstrable harm.
+  - **Material** - should be fixed before merge but does not invalidate the approach: a missing test for new logic, a real unhandled edge case, a meaningful maintainability problem, a clear written-rule violation.
+  - **Optional** - polish, nits, naming, light duplication, forward-looking debt, stylistic preference. Fine to merge without.
+  Instruct them: **default to Optional** unless you can name concrete harm that lifts a finding to Material or Blocking. Do not inflate tiers to seem thorough. (You re-tier everything yourself in Step 6; their tags are signal, not the final call.)
+- A request for a markdown report, ~500 words, structured with `##`/`###` headings and bullet lists, with quoted `file:line` and a `[Blocking]`/`[Material]`/`[Optional]` tag on each finding where applicable. The report is shown **verbatim** in this reviewer's own tab, so it must read well standalone.
 
 **Role brief**: paste the body of the reviewer's `.md` file (everything after the frontmatter). That's the reviewer's personality and focus; don't rewrite it.
 
-The roster is a mix of lenses: doomsayer and positive feed the Red/Green flags; nitpicker, architect, and rule stickler each sharpen one axis. Every report is preserved verbatim in its own tab, and its findings are also folded into the consolidated buckets in Step 6, tagged by the reviewer's `slug`.
+The roster is a mix of lenses: doomsayer hunts blocking problems, positive feeds the green flags, nitpicker/architect/rule-stickler each sharpen one axis, and the independent reviewer brings a context-free cold read. Every report is preserved verbatim in its own tab, and its findings are also folded into the consolidated severity-tier buckets in Step 6, tagged by the reviewer's `slug`.
 
 **5.4 — Collect.** Wait for all selected reviewers to finish. Keep each full markdown report in context — you'll write them to disk in Step 7. Note each report's `slug` (from its reviewer file) so you can name the files correctly.
 
@@ -157,25 +162,30 @@ The roster is a mix of lenses: doomsayer and positive feed the Red/Green flags; 
 
 **Azure DevOps** (see Provider reference for the exact commands):
 1. The PR GET endpoint for metadata (title, description, status, isDraft, createdBy, source/target refs, the two merge-commit SHAs).
-2. `git -C <clone> diff <targetSha> <sourceSha>` for the diff (same commits the subagents used).
+2. `git -C <clone> diff <targetSha>...<sourceSha>` for the diff (three-dot / merge-base, same command the subagents used - see the note in the Diff row of the Provider reference).
 3. The policy-evaluations endpoint for CI/branch-policy status - it's optional and can be fiddly (needs the project GUID); if it doesn't resolve cleanly, set `ci_status` to `"unknown"` and move on rather than blocking the review.
 
 Then, for both providers:
 4. Read all the subagent reports with the diff open. Where they disagree, use your own judgement.
 5. **Preserve each report verbatim.** In Step 7 you'll write each report to `$REPORT_DIR/reports/<slug>.md` unchanged — assemble.py renders each into its own tab. Don't summarise them away; the tabs are meant to show each agent's own voice.
-6. Decide on a **verdict** — pick exactly one:
-   - 🟢 **Approve and merge** — solid PR, ship it
-   - 🟡 **Approve with minor changes** — green-light pending small fixes
-   - 🟠 **Request changes** — needs material rework before re-review
-   - 🔴 **Reject** — fundamentally wrong approach or unneeded
-7. Bucket your synthesized findings into the four consolidated buckets, drawing from **all** the reviewers by severity (not one bucket per reviewer):
-   - **Red flags** — the strongest blocking points you agree with after seeing the diff. Often the doomsayer's, but an architect structural objection or a hard rule violation can be a red flag too.
-   - **Green flags** — the positive reviewer's strongest points you agree with.
-   - **Minor issues** — nits worth fixing before merge. Most nitpicker findings and soft rule deviations land here.
-   - **Future pitfalls** — not blocking, but worth flagging for later. Architectural debt often lands here.
-   - **Tag every finding with its source reviewer** (the reviewer's `slug`) so the human can trace it back to the tab — this becomes the `src` field in `synthesis.json` (e.g. `architect`, `nitpicker`, `rules`, `doomsayer`, `positive`). If you reached a finding by combining reviewers or via your own read, tag it `synthesis`. A reviewer's `feeds` frontmatter is a soft hint for its usual bucket, not a rule — bucket by actual severity.
+6. **Re-tier every finding, then derive the verdict from the tiers.** The reviewers each proposed a tier; with the diff open, you make the final call. The three tiers (same definitions the reviewers used):
+   - **Blocking** - correctness bug, security hole, data loss, broken build/tests, or an approach that should not merge as-is. Demonstrable harm.
+   - **Material** - should be fixed before merge but does not invalidate the approach: a missing test for new logic, a real unhandled edge case, a meaningful maintainability problem, a clear written-rule violation. The author would reasonably be expected to address it.
+   - **Optional** - polish, nits, naming, light duplication, forward-looking debt, stylistic preference. Genuinely fine to merge without. **This is the default tier** - a finding stays Optional unless you can articulate concrete harm that lifts it.
 
-Don't pad. Empty buckets are fine (assemble.py renders a single "None" row). A finding raised by a reviewer that you disagree with after reading the diff should be dropped from the buckets (it still lives in that reviewer's tab) — or surfaced as a Callout if the judgement is worth explaining.
+   Then pick exactly one verdict, derived **mechanically from the worst-populated tier** (this is what makes the verdict reproducible rather than a vibe):
+   - 🔴 **Reject** - a Blocking item that makes the whole approach wrong or unneeded.
+   - 🟠 **Request changes** - one or more (fixable) Blocking items.
+   - 🟡 **Approve with minor changes** - no Blocking, but at least one Material item.
+   - 🟢 **Approve and merge** - no Blocking and no Material. Optional items and green flags never hold up a merge.
+7. Bucket your synthesized findings into the four buckets, which **are** the tiers, drawing from **all** the reviewers (not one bucket per reviewer):
+   - **Blocking** / **Material** / **Optional** - your re-tiered negative findings.
+   - **Green flags** - the positive reviewer's strongest points you agree with. Never affects the verdict.
+   - **Tag every finding with its source reviewer** (the reviewer's `slug`) so the human can trace it back to the tab — this becomes the `src` field in `synthesis.json` (e.g. `architect`, `nitpicker`, `rules`, `doomsayer`, `positive`, `independent`). If you reached a finding by combining reviewers or via your own read, tag it `synthesis`. A reviewer's `feeds` frontmatter is a soft hint for its usual tier, not a rule - tier by actual severity.
+
+Don't pad. Empty buckets are fine (assemble.py renders a single "None" row). A finding raised by a reviewer that you disagree with after reading the diff should be dropped from the buckets (it still lives in that reviewer's tab) - or surfaced as a Callout if the judgement is worth explaining.
+
+**On "when is it done".** 🟢 means no Blocking and no Material issues remain - NOT that the PR is flawless. A later fresh review (one with no memory of this chat, e.g. the independent reviewer, or a brand-new `/review-pr` run) will almost always surface new Optional-tier nits, because any reviewer asked to find issues will find some. That is expected and is **not** a reason to keep iterating. Once a pass turns up only Optional items, the PR is merge-ready; treat the long tail of nits as the author's discretion, not a gate. Specifically: do **not** promote an Optional nit to Material just because it is the only thing left to flag. The tiers exist precisely so the loop converges instead of finding fresh things to "fix" forever.
 
 ---
 
@@ -214,16 +224,16 @@ mkdir -p "$REPORT_DIR/reports"
     "timestamp": "2026-05-28 16:40"
   },
   "verdict": {
-    "class": "verdict-changes",
-    "text": "🟠 Request changes",
+    "class": "verdict-minor",
+    "text": "🟡 Approve with minor changes",
     "rationale": "One or two sentences explaining the call.",
     "purpose": "Your one-sentence recap of what the PR does and why."
   },
   "buckets": {
-    "red":    [ {"src": "architect", "label": "Retry logic in the wrong layer.", "body": "Belongs in transport, not jobs.", "loc": "src/jobs/runner.ts:77"} ],
-    "green":  [ {"src": "positive", "label": "Closes a real reliability gap.", "body": "Transient 503s no longer reach users.", "loc": ""} ],
-    "minor":  [ {"src": "nitpicker", "label": "Backoff math duplicated 3x.", "body": "Extract a shared helper.", "loc": "src/net/retry.ts:30"} ],
-    "future": []
+    "blocking": [],
+    "material": [ {"src": "architect", "label": "Retry logic in the wrong layer.", "body": "Belongs in transport, not jobs.", "loc": "src/jobs/runner.ts:77"} ],
+    "optional": [ {"src": "nitpicker", "label": "Backoff math duplicated 3x.", "body": "Extract a shared helper.", "loc": "src/net/retry.ts:30"} ],
+    "green":    [ {"src": "positive", "label": "Closes a real reliability gap.", "body": "Transient 503s no longer reach users.", "loc": ""} ]
   },
   "pushback": [],
   "callouts": []
@@ -231,7 +241,8 @@ mkdir -p "$REPORT_DIR/reports"
 ```
 
 Field rules:
-- `verdict.class` is one of `verdict-merge` / `verdict-minor` / `verdict-changes` / `verdict-reject`; `verdict.text` is the matching label (`🟢 Approve and merge`, etc.).
+- The four `buckets` keys are exactly `blocking`, `material`, `optional`, `green` - they are the severity tiers plus the positive bucket. (Older `red`/`minor`/`future` keys are gone.)
+- `verdict.class` is one of `verdict-merge` / `verdict-minor` / `verdict-changes` / `verdict-reject`; `verdict.text` is the matching label (`🟢 Approve and merge`, `🟡 Approve with minor changes`, `🟠 Request changes`, `🔴 Reject`). Derive it from the buckets per Step 6: any `blocking` -> `verdict-changes` (or `verdict-reject` if fundamental); else any `material` -> `verdict-minor`; else (only `optional`/`green`) -> `verdict-merge`.
 - Each finding object: `src` (reviewer slug, or `synthesis`), `label` (short bold lead, ends with a period), `body` (one or two sentences), `loc` (a single `file:line` or `""`). assemble.py escapes all of these and renders `loc` as inline code — so put plain text in `label`/`body`, no HTML or markdown.
 - Empty bucket → `[]` (assemble.py renders "None.").
 - `pushback` and `callouts` are arrays of `{label, body, loc}` (no `src`). First-review runs leave both as `[]`. See the Callouts and Re-review sections for when to fill them.
@@ -282,7 +293,7 @@ When they do:
 ```markdown
 ## 🤖 Agent Review
 ### 🚨 Must Fix / Address
-- ✌️ **None** - <reason> _(or real items if any red flags blocked merge)_
+- ✌️ **None** - <reason> _(or real items if any Blocking items held up merge)_
 
 ### ⚠️ Notable Changes
 - <emoji> **<bold label>** - <one or two sentences>
@@ -302,6 +313,7 @@ Formatting rules (strict):
 4. No blank lines between bullets within a section.
 5. No em dashes anywhere — use a regular hyphen.
 6. No `Made by @<user>` footer in the comment — the user adds that themselves.
+7. Map the severity tiers to sections: **Blocking -> Must Fix / Address**, **Material -> Notable Changes**, **Optional -> Small Feedback**; Callouts stay in Callouts. If there are no Blocking items (verdict 🟢 or 🟡), the Must Fix section is just the ✌️ None bullet.
 
 ---
 
@@ -310,12 +322,12 @@ Formatting rules (strict):
 The Callouts section is for **your own** notes to the human reviewer — judgement calls you made during synthesis that you want surfaced rather than absorbed silently. It is most useful in re-review mode but also valid in first-review.
 
 Use Callouts when:
-- A subagent flagged something and you decided NOT to escalate it to Pushback / Red Flag / Minor Issue, but you want the human to see your reasoning rather than have to guess at it.
+- A subagent flagged something and you decided NOT to escalate it to Pushback / Blocking / Material, but you want the human to see your reasoning rather than have to guess at it.
 - Two or more subagents disagreed and you sided with one — explain which and why, especially if a future maintainer reading the report wouldn't otherwise know there was disagreement.
 - You made a deliberate scope cut (e.g. "didn't review the test fixture changes because they're regenerated from a tool") and want the human to verify the cut.
 - You couldn't access something (offline clone, gated diff, missing tool) and the synthesis is partial.
 
-Do NOT use Callouts as a dumping ground. If a point belongs in Red Flags / Pushback / Minor Issues, put it there. Callouts is specifically for **meta-commentary about the synthesis itself**, not for additional findings.
+Do NOT use Callouts as a dumping ground. If a point belongs in Blocking / Material / Optional / Pushback, put it there. Callouts is specifically for **meta-commentary about the synthesis itself**, not for additional findings.
 
 To use Callouts, fill the `callouts` array in `synthesis.json` with `{label, body, loc}` objects (same shape as a finding, minus `src`). If there are no callouts, leave it `[]` — assemble.py renders no section at all rather than an empty box.
 
@@ -353,9 +365,9 @@ When you see this **in the same chat** that already ran `/review-pr` (i.e. you s
    ```
    If the clone is on the PR branch, `git -C <clone-path> pull` to sync.
 
-   **Azure DevOps:** re-hit the PR GET endpoint for the new merge-commit SHAs, re-fetch both into the clone with the token-authed `git fetch` (Provider reference), then `git -C <clone> diff <newTargetSha> <newSourceSha>`. The SHAs move between iterations, so always re-read them from the fresh PR JSON rather than reusing the first pass's.
+   **Azure DevOps:** re-hit the PR GET endpoint for the new merge-commit SHAs, re-fetch both into the clone with the token-authed `git fetch` (Provider reference), then `git -C <clone> diff <newTargetSha>...<newSourceSha>` (three-dot / merge-base). The SHAs move between iterations, so always re-read them from the fresh PR JSON rather than reusing the first pass's.
 
-2. **Re-spawn the same roster in parallel** (the same reviewers that ran the first time — respect any earlier skips, and any new skip the user voices now). Rebuild each prompt as the shared envelope + that reviewer's file body, plus four extra inputs:
+2. **Re-spawn the same roster in parallel** (the same reviewers that ran the first time — respect any earlier skips, and any new skip the user voices now). Rebuild each prompt as the shared envelope + that reviewer's file body (the independent reviewer's envelope still withholds project context per Step 5.3; it may see its own prior report, just not external context), plus four extra inputs:
    - That reviewer's own original report from the first pass (the doomsayer gets the doomsayer report, the architect gets the architect report, etc.)
    - The `/action-feedback` output (Actioned + Not actioned)
    - The fresh diff
@@ -370,9 +382,9 @@ When you see this **in the same chat** that already ran `/review-pr` (i.e. you s
 
    If the reasoning was actually convincing, drop it. Don't insist for insistence's sake.
 
-   **If a subagent re-flagged something but you decided not to escalate it to Pushback**, that is exactly the case for a Callout (see Callouts section above). Drop-vs-pushback is a judgement call; surfacing the judgement to the human is better than absorbing it silently. Example wording: "Doomsayer re-flagged X on the second pass. I'm holding it in Future Pitfalls rather than Pushback because the failure mode is unobserved and the author's scope cut is sound — but flagging here so you can override if you disagree."
+   **If a subagent re-flagged something but you decided not to escalate it to Pushback**, that is exactly the case for a Callout (see Callouts section above). Drop-vs-pushback is a judgement call; surfacing the judgement to the human is better than absorbing it silently. Example wording: "Doomsayer re-flagged X on the second pass. I'm holding it as Optional rather than Pushback because the failure mode is unobserved and the author's scope cut is sound - but flagging here so you can override if you disagree."
 
-5. **Pick a new verdict** based on the current state.
+5. **Re-derive the verdict from the current tiers** using Step 6's mechanical rule. If the only findings left are Optional, the verdict is 🟢 - say so plainly and do NOT invent Material items to justify another round. Converging on 🟢 with a short Optional list (or none) is the expected, correct end state of the loop, not a sign you missed something.
 
 6. **Rebuild the report in place** — same `$REPORT_DIR` from the original run:
    - Overwrite each `$REPORT_DIR/reports/<slug>.md` with that reviewer's **fresh** second-pass report (verbatim).
@@ -424,7 +436,7 @@ Keep the token in a shell variable only - **never write it to a file**. Use it i
 | **File list** (3) | `gh pr view --json files` | `curl -s -H "Authorization: Bearer $TOKEN" "$BASE/pullRequests/$N/iterations?api-version=7.1"` -> take the latest iteration id, then `.../pullRequests/$N/iterations/<id>/changes?api-version=7.1` |
 | **Clone** (2) | `gh repo clone $O/$R <path>` | `git -c http.extraHeader="Authorization: Bearer $TOKEN" clone "https://dev.azure.com/$O/$P/_git/$R" <path>` |
 | **Fetch PR commits** (2) | (n/a - `gh pr checkout`) | `git -C <clone> -c http.extraHeader="Authorization: Bearer $TOKEN" fetch origin <sourceBranch> <targetBranch>` (branch names = `sourceRefName`/`targetRefName` minus `refs/heads/`) |
-| **Diff** (5 subagents, 6) | `gh pr diff $N` | `git -C <clone> diff <targetSha> <sourceSha>` where `targetSha=lastMergeTargetCommit.commitId`, `sourceSha=lastMergeSourceCommit.commitId` from the PR JSON |
+| **Diff** (5 subagents, 6) | `gh pr diff $N` | `git -C <clone> diff <targetSha>...<sourceSha>` (THREE dots) where `targetSha=lastMergeTargetCommit.commitId`, `sourceSha=lastMergeSourceCommit.commitId` from the PR JSON. Three-dot diffs from the merge-base, so it shows only the PR's changes; a two-dot `diff <targetSha> <sourceSha>` is WRONG when the branch is behind its target (it folds in target-ahead commits, reversed) and can balloon the file count. |
 | **CI / checks** (6) | `gh pr checks $N` | *optional* - branch-policy evaluations: `curl -s -H "Authorization: Bearer $TOKEN" "https://dev.azure.com/$O/$P/_apis/policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<projectId>/$N&api-version=7.1"`. Needs `<projectId>` (= `repository.project.id` from the PR JSON). If it doesn't resolve, set `ci_status` to `"unknown"`. |
 | **Repo metadata** (3) | `gh repo view ... --json ...` | `curl -s -H "Authorization: Bearer $TOKEN" "$BASE?api-version=7.1"` (name, defaultBranch, webUrl; no languages/topics) |
 | **Post comment** (8) | `gh pr comment` | **Not supported** - render the comment for manual paste; never post. |
@@ -440,7 +452,7 @@ The `pr` block fields come from the PR GET response plus a `git diff --numstat`:
 - `head_ref` <- `.sourceRefName` minus `refs/heads/`
 - `url` <- `https://dev.azure.com/$O/$P/_git/$R/pullrequest/$N` (the web URL, NOT the `_apis` URL)
 - `repo` <- `$O/$R` (include the project if useful: `$O/$P/$R`)
-- `additions` / `deletions` / `files` <- derive from `git -C <clone> diff --numstat <targetSha> <sourceSha>` (sum columns 1 and 2; count lines for files)
+- `additions` / `deletions` / `files` <- derive from `git -C <clone> diff --numstat <targetSha>...<sourceSha>` (three-dot; sum columns 1 and 2; count lines for files)
 - `ci_status` <- from policy evaluations if resolved, else `"unknown"`
 - If `.isDraft` is `true`, note "(draft)" in `verdict.purpose` so the human knows it's not merge-ready.
 
@@ -461,7 +473,8 @@ slug: nitpicker                   # tab id + report filename (reports/<slug>.md)
 emoji: "🔬"                        # shown on the tab and the panel header
 order: 30                         # tab order (lower = further left)
 enabled: true                     # false = never spawned unless the user explicitly asks for it
-feeds: minor                      # soft hint for the usual synthesis bucket (red|green|minor|future); optional
+feeds: optional                   # soft hint for the usual severity tier (blocking|material|optional|green|any); optional
+independent: false                # optional; true = spawned with NO project context (see below)
 role: duplication, abstraction, tidiness   # short subtitle under the panel header; optional
 ---
 
@@ -480,11 +493,12 @@ The **body is the role brief** pasted into the subagent prompt in Step 5 (after 
 - **Add one**: drop a new `.md` in the folder with a unique `slug` and a sensible `order`. It's picked up automatically next run — no other file needs editing.
 - **Reorder**: change `order`. Synthesis always renders as the first/default tab regardless.
 - `slug` must be unique and filesystem-safe (it's used for `reports/<slug>.md`, the tab/panel id, and the finding `src` tag).
+- **`independent: true`**: marks a context-free reviewer. In Step 5.3 its prompt is built WITHOUT your project understanding and without any agent memory, external notes, or knowledge-base context - it only gets the PR, the clone, and the cold-eyes instruction. assemble.py ignores this field; it only changes how the prompt is assembled. The default `independent.md` uses it. There is normally no reason to have more than one independent reviewer.
 
 ## Notes
 
-- If CI is failing, treat the failure as a red flag only if it's caused by the PR itself (not flaky infra). Otherwise mention it under future pitfalls or skip.
+- If CI is failing, treat the failure as a **Blocking** item only if it's caused by the PR itself (not flaky infra). Otherwise note it as **Optional** or skip.
 - Don't restate the PR description in the report. The author wrote it; reflect it back only as one sentence in `verdict.purpose` in `synthesis.json`.
 - If you couldn't read the local repo (only the diff), say so explicitly in chat before generating the report, and flag it in `verdict.rationale` — the user should know the synthesis is diff-only.
 - The report directory under `~/.cache/review-pr/` is meant to be ephemeral. Don't reuse old ones across separate `/review-pr` invocations. Re-review mode is the only time you overwrite an existing report.
-- `assemble.py` and `report-template.html` are stdlib-only / no-build. If you change the report's look, edit the template's CSS; if you change its structure, edit `assemble.py`.
+- `assemble.py` and `report-template.html` are stdlib-only / no-build. If you change the report's look, edit the template's CSS; if you change its structure, edit `assemble.py`. The report uses an editorial/print aesthetic (Fraunces + Newsreader + IBM Plex Mono) loaded from Google Fonts, with a system serif/mono fallback if the machine is offline.

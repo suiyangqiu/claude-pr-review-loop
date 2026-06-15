@@ -4,7 +4,7 @@ slug: nitpicker
 emoji: "🔬"
 order: 30
 enabled: true
-feeds: minor
+feeds: optional
 role: duplication, abstraction, tidiness
 ---
 

@@ -4,7 +4,7 @@ slug: doomsayer
 emoji: "🔴"
 order: 10
 enabled: true
-feeds: red
+feeds: blocking
 role: reasons not to merge
 ---
 

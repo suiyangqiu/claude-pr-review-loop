@@ -4,7 +4,7 @@ slug: architect
 emoji: "🏛️"
 order: 40
 enabled: true
-feeds: future
+feeds: material
 role: is this the right structure?
 ---
 

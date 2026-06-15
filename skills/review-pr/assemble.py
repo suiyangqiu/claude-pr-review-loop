@@ -22,11 +22,14 @@ SKILL_DIR = Path(__file__).resolve().parent
 REVIEWERS_DIR = SKILL_DIR / "reviewers"
 TEMPLATE = SKILL_DIR / "report-template.html"
 
+# Buckets ARE the severity tiers. The verdict is derived from the worst-populated
+# negative tier (see SKILL.md Step 6): any Blocking -> changes/reject; else any
+# Material -> minor; else (only Optional / Green) -> merge. Green never gates.
 BUCKET_DEFS = [
-    ("red", "red", "🚨 Major Red Flags"),
-    ("green", "green", "✅ Major Green Flags"),
-    ("minor", "orange", "🤏 Minor Issues"),
-    ("future", "yellow", "🔮 Future Pitfalls"),
+    ("blocking", "blocking", "Blocking"),
+    ("material", "material", "Material"),
+    ("optional", "optional", "Optional"),
+    ("green",    "green",    "Green Flags"),
 ]
 
 
@@ -177,6 +180,11 @@ def build_header(syn):
     )
 
 
+def section_open(cls, heading, count):
+    count_html = f' <span class="count">{count}</span>' if count else ""
+    return f'<section class="{cls}"><h2>{heading}{count_html}</h2><ul class="findings">'
+
+
 def build_synthesis_panel(syn):
     v = syn["verdict"]
     parts = ['<div class="panel" id="panel-synthesis">']
@@ -185,7 +193,7 @@ def build_synthesis_panel(syn):
                               ("callouts", "callouts", "Reviewer notes")):
         items = syn.get(key) or []
         if items:
-            parts.append(f'<section class="{cls}"><h2>{heading}</h2><ul class="findings">')
+            parts.append(section_open(cls, heading, len(items)))
             parts += [finding_li(it, with_src=False) for it in items]
             parts.append("</ul></section>")
 
@@ -193,13 +201,14 @@ def build_synthesis_panel(syn):
         f'<div class="rationale"><div class="label">Verdict rationale</div>{e(v["rationale"])}</div>'
     )
     parts.append(
-        f'<div class="purpose"><div class="label">What this PR does</div>{e(v["purpose"])}</div>'
+        '<div class="purpose"><div class="label">What this PR does</div>'
+        f'<p class="purpose-text">{e(v["purpose"])}</p></div>'
     )
 
     buckets = syn.get("buckets", {})
     for key, cls, heading in BUCKET_DEFS:
         items = buckets.get(key) or []
-        parts.append(f'<section class="{cls}"><h2>{heading}</h2><ul class="findings">')
+        parts.append(section_open(cls, heading, len(items)))
         if items:
             parts += [finding_li(it, with_src=True) for it in items]
         else:
@@ -244,7 +253,7 @@ def build_agent_panels(report_dir, roster):
             f'<button class="tab" data-panel="panel-{e(slug)}">{meta["emoji"]} {e(meta["name"])}</button>'
         )
         role = e(meta.get("role", "")).strip()
-        role_html = f'<span class="role">&mdash; {role}</span>' if role else ""
+        role_html = f'<span class="role">· {role}</span>' if role else ""
         panels.append(
             f'<div class="panel agent-report" id="panel-{e(slug)}" hidden>'
             f'<div class="agent-head"><span class="badge">{meta["emoji"]}</span>'
@@ -269,6 +278,7 @@ def main():
 
     out = TEMPLATE.read_text(encoding="utf-8")
     out = out.replace("{{PR_TITLE}}", e(syn["pr"]["title"]))
+    out = out.replace("{{VERDICT_CLASS}}", e(syn["verdict"]["class"]))
     out = out.replace("{{HEADER}}", build_header(syn))
     out = out.replace("{{TABS}}", "\n".join(t for t in tabs if t))
     out = out.replace("{{PANELS}}", "\n".join(p for p in panels if p))

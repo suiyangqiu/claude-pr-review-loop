@@ -14,7 +14,7 @@ The two skills are useful on their own, but they are designed to be run together
 
 ### `/review-pr <pr-url-or-number>`
 
-Reviews a GitHub **or** Azure DevOps PR with a roster of specialist sub-agents that each form an independent view, then synthesizes a single verdict. Output is a self-contained HTML report (a Synthesis tab plus one tab per reviewer) plus an optional `## 🤖 Agent Review` comment it can post to the PR.
+Reviews a GitHub **or** Azure DevOps PR with a roster of specialist sub-agents that each form an independent view, then synthesizes a single verdict graded by severity tiers. Output is a self-contained, editorial-styled HTML report (a Synthesis tab plus one tab per reviewer) plus an optional `## 🤖 Agent Review` comment it can post to the PR.
 
 Verdicts are one of:
 
@@ -24,6 +24,8 @@ Verdicts are one of:
 | 🟡 | Approve with minor changes |
 | 🟠 | Request changes |
 | 🔴 | Reject |
+
+The verdict is **derived from severity tiers**, not picked by feel. Every finding is graded **Blocking** (must fix), **Material** (should fix before merge), or **Optional** (polish / nits), and the verdict falls out of the worst tier present: any Blocking → 🟠 / 🔴, else any Material → 🟡, else (only Optional) → 🟢. So 🟢 means *no Blocking or Material issues remain* - not that the PR is flawless. That is the point of the loop: a later fresh pass that only surfaces Optional nits does not change the verdict, so the review converges instead of finding things to "fix" forever.
 
 ### `/action-feedback <path-to-report>`
 
@@ -54,19 +56,24 @@ The review skill deliberately stays **diff-blind** until after the sub-agents ha
 
 ## How `/review-pr` gets its agents
 
-The reviewer roster is **data, not code**. Each reviewer is a single markdown file in [`skills/review-pr/reviewers/`](skills/review-pr/reviewers/). At review time the skill lists that folder, reads every `.md`, and spawns one sub-agent per reviewer whose frontmatter says `enabled: true`, all in parallel. Each sub-agent prompt is built from a shared envelope (the PR identifier, the clone path, the project understanding, instructions to fetch the diff itself) plus that file's body, which is the reviewer's role brief.
+The reviewer roster is **data, not code**. Each reviewer is a single markdown file in [`skills/review-pr/reviewers/`](skills/review-pr/reviewers/). At review time the skill lists that folder, reads every `.md`, and spawns one sub-agent per reviewer whose frontmatter says `enabled: true`, all in parallel. Each sub-agent prompt is built from a shared envelope (the PR identifier, the clone path, the project understanding, instructions to fetch the diff itself, and a severity-tiering instruction) plus that file's body, which is the reviewer's role brief. The one exception is the **independent reviewer** (see below), which is deliberately given no project context at all.
 
 The default roster:
 
 | Reviewer | Slug | Looks for |
 |---|---|---|
 | 🔴 Doomsayer | `doomsayer` | Reasons not to merge: flaws, risks, whether it is needed at all |
+| 🧊 Independent Reviewer | `independent` | A cold read with **no project context at all** (see below) |
 | 🟢 Positive Reviewer | `positive` | Why the PR is worth shipping, with suggestions on the weak spots |
 | 🔬 Code Quality Nitpicker | `nitpicker` | Duplication, abstraction opportunities, dead weight, tidiness |
 | 🏛️ Architect | `architect` | Structural fit, boundaries, whether a better-shaped solution exists |
 | 📋 Rule Stickler | `rules` | Compliance with the repo's own rule docs (CLAUDE.md, CONTRIBUTING, linters, etc.) |
 
 Because the roster is just files, you tailor it to your codebase without touching the workflow.
+
+### The independent reviewer
+
+Every other reviewer is briefed with your project understanding. The **independent reviewer** (`independent: true` in its frontmatter) is deliberately not: its prompt is built with no agent memory, no external notes or knowledge base, and no maintainer brief. It may read what ships with the repo (the diff, the source, in-repo docs like `README`/`CLAUDE.md`), but it builds its own understanding from scratch. The point is to catch what context-primed reviewers rationalize away or never question because "that's just how this repo does it". It is enabled by default; skip it for a run like any other reviewer.
 
 ### Add a reviewer
 
@@ -79,7 +86,8 @@ slug: security              # tab id + report filename (reports/<slug>.md) + fin
 emoji: "🔒"                  # shown on the tab and the panel header
 order: 25                   # tab order, lower = further left
 enabled: true               # false = never spawned unless you ask for it by name
-feeds: red                  # soft hint for the usual synthesis bucket: red | green | minor | future (optional)
+feeds: blocking             # soft hint for the usual severity tier: blocking | material | optional | green | any (optional)
+independent: false          # optional; true = spawned with NO project context (a fresh-eyes reviewer)
 role: authn, secrets, input validation   # short subtitle under the panel header (optional)
 ---
 
@@ -145,12 +153,13 @@ skills/
     SKILL.md              # the full review + re-review workflow (GitHub + Azure DevOps)
     reviewers/            # one .md per reviewer = the data-driven roster
       doomsayer.md
+      independent.md
       positive.md
       nitpicker.md
       architect.md
       rule-stickler.md
     assemble.py           # builds the tabbed HTML report from reviews + synthesis.json
-    report-template.html  # the report shell (CSS + structure)
+    report-template.html  # the report shell (editorial CSS + structure)
   action-feedback/
     SKILL.md              # the feedback-actioning companion
 ```

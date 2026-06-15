@@ -21,12 +21,12 @@ Do **not** auto-trigger on natural-language requests. The user invokes this skil
 
 ### 1. Read the feedback document
 
-`Read` the file at `$ARGUMENTS`. If it's an HTML report (`.html`), extract the human-readable findings from the body and ignore the markup. The relevant sections to surface are typically:
-- Major red flags
-- Major green flags (skip — these are praise, nothing to action)
-- Minor issues
-- Future pitfalls
-- Pushback (if a re-review report)
+`Read` the file at `$ARGUMENTS`. If it's an HTML report (`.html`), extract the human-readable findings from the body and ignore the markup. A `/review-pr` report groups findings into severity tiers; surface them in priority order:
+- **Blocking** - must fix before merge
+- **Material** - should fix before merge
+- **Optional** - polish / nits (action the cheap, clearly-good ones; fine to decline the rest)
+- **Green flags** (skip — these are praise, nothing to action)
+- **Pushback** (if a re-review report)
 - Any verdict rationale
 
 ### 2. Go through each piece of feedback, on its merits
@@ -41,6 +41,8 @@ Decide for each item: **action it** or **decline it with reasoning**.
 
 You can also choose to action it *differently* than suggested if you have a stronger fix. Note that explicitly in your response.
 
+**Weight your effort by tier.** Blocking and Material items deserve a real fix or a genuinely strong reason to decline. **Optional items are optional** - action the ones that are cheap and clearly an improvement, but feel free to decline low-value churn with a one-line reason. Do not treat declining an Optional nit as a failure; a PR that is merge-ready apart from a few declined nits is the expected end state. Don't manufacture work to look thorough.
+
 ### 3. Action the items you agreed with
 
 Make the actual code changes. Use the usual tools (`Edit`, `Write`, `Bash`). Keep changes scoped to what the feedback asked for — don't bundle in unrelated refactors. If a change requires a decision the user should make (e.g. naming, public API shape), pause and ask via `AskUserQuestion` before proceeding.
@@ -52,18 +54,18 @@ Compose a markdown report in **exactly this shape**:
 ```markdown
 ## Actioned
 
-- **<short label>** - <one or two sentences on the implementation>. <file.ts:line> if relevant.
-- **<short label>** - <implementation note>.
+- **[Blocking] <short label>** - <one or two sentences on the implementation>. <file.ts:line> if relevant.
+- **[Material] <short label>** - <implementation note>.
 
 ## Not actioned
 
-- **<short label>** - <why you disagree>. Be specific about the reasoning the author of the feedback would need to address to convince you.
-- **<short label>** - <why you disagree>.
+- **[Optional] <short label>** - <why you disagree>. Be specific about the reasoning the author of the feedback would need to address to convince you.
+- **[Material] <short label>** - <why you disagree>.
 ```
 
 Rules:
 - One bullet per item. No paragraphs.
-- Lead with a bold short label, then a hyphen, then the explanation. No em dashes — use a regular hyphen.
+- Lead with the item's **tier tag** (`[Blocking]` / `[Material]` / `[Optional]`) carried over from the report, then a bold short label, then a hyphen, then the explanation. The tier tells the re-review how hard to push: a declined Blocking/Material item is a real disagreement; a declined Optional is usually fine. No em dashes — use a regular hyphen.
 - "Not actioned" items must include a concrete reason, not just "disagree". The `/review-pr` re-review will use this to decide whether to push back.
 - If everything was actioned, render the "Not actioned" section as `_(nothing declined)_`. If nothing was actioned, render the "Actioned" section as `_(nothing actioned)_`.
 - Skip "Green flags" items entirely — they're not actionable.
