@@ -1,7 +1,7 @@
 ---
 name: action-feedback
 description: Work through a feedback document (e.g. a `/review-pr` HTML report or any markdown feedback file), challenge each point on its merits, action what you agree with, and report back in an "Actioned / Not actioned" format that gets copied to the clipboard. Trigger ONLY via the slash command `/action-feedback <path-to-feedback-document>`.
-argument-hint: <path-to-feedback-document>
+argument-hint: <path-to-feedback-document> [plan]
 ---
 
 # Action feedback: $ARGUMENTS
@@ -15,13 +15,23 @@ User-invocable only. Trigger when the user types `/action-feedback <path>`. The 
 
 Do **not** auto-trigger on natural-language requests. The user invokes this skill deliberately.
 
+### Plan-first mode (configurable)
+
+By default this skill **actions changes immediately** (decide -> edit -> report). If the user asks it to **plan first**, it instead proposes the changes and waits for sign-off before touching any code.
+
+Turn on plan-first mode when **either** is true:
+- `$ARGUMENTS` contains a `plan` token after the path (e.g. `/action-feedback ~/.cache/review-pr/.../report.html plan`).
+- The user's invocation message says to plan first / propose first / don't make changes yet / "let me review the plan" / similar.
+
+When neither applies, run normally (action immediately). When in doubt and the user's wording leans toward wanting a look before edits, prefer plan-first - it's the safer default. The `plan` token is config, not part of the path; strip it before resolving the file.
+
 ---
 
 ## Process
 
 ### 1. Read the feedback document
 
-`Read` the file at `$ARGUMENTS`. If it's an HTML report (`.html`), extract the human-readable findings from the body and ignore the markup. A `/review-pr` report groups findings into severity tiers; surface them in priority order:
+`Read` the file at `$ARGUMENTS` (if a trailing `plan` token is present, strip it first - that's the plan-first flag, not part of the path). If it's an HTML report (`.html`), extract the human-readable findings from the body and ignore the markup. A `/review-pr` report groups findings into severity tiers; surface them in priority order:
 - **Blocking** - must fix before merge
 - **Material** - should fix before merge
 - **Optional** - polish / nits (action the cheap, clearly-good ones; fine to decline the rest)
@@ -43,11 +53,37 @@ You can also choose to action it *differently* than suggested if you have a stro
 
 **Weight your effort by tier.** Blocking and Material items deserve a real fix or a genuinely strong reason to decline. **Optional items are optional** - action the ones that are cheap and clearly an improvement, but feel free to decline low-value churn with a one-line reason. Do not treat declining an Optional nit as a failure; a PR that is merge-ready apart from a few declined nits is the expected end state. Don't manufacture work to look thorough.
 
-### 3. Action the items you agreed with
+### 2b. Plan-first gate (only in plan-first mode)
 
-Make the actual code changes. Use the usual tools (`Edit`, `Write`, `Bash`). Keep changes scoped to what the feedback asked for — don't bundle in unrelated refactors. If a change requires a decision the user should make (e.g. naming, public API shape), pause and ask via `AskUserQuestion` before proceeding.
+**Skip this step entirely in default mode** - go straight to step 3 and start editing.
 
-### 4. Report back in the structured format
+In plan-first mode, do NOT make any code changes yet. Instead, present a plan and wait:
+
+1. For each item, state your decision (action / action differently / decline) with a one-line rationale, grouped under **Will action** and **Won't action**, each tagged with its tier (`[Blocking]`/`[Material]`/`[Optional]`). For "Will action" items, briefly say *what* the change will be and *where* (`file.ts:line`), not just that you'll do it.
+2. Ask the user to confirm via `AskUserQuestion`: proceed as planned / adjust first. Make "Proceed" the first (recommended) option. The user can also reply free-form to redirect (e.g. "skip item 3", "action the nitpicker's point too", "fix it this other way").
+3. If the user asks for adjustments, revise the plan and re-confirm. Loop until they approve.
+4. Only once the user approves, continue to step 3 and make the changes exactly as agreed.
+
+Do not start editing files until the user has signed off on the plan.
+
+### 3. Set up an isolated worktree on the PR's branch
+
+**Always action feedback inside a dedicated git worktree checked out to the PR's own branch - never edit the main checkout directly.** The fixes must land on the PR branch so they stay attached to the PR. Do this before making any code changes (in plan-first mode, after the user approves the plan).
+
+1. **Identify the repo and PR branch.** Derive them from the feedback document - a `/review-pr` report names the repo, PR number, and source branch (the cache dir is named like `<org>-<repo>-<prNumber>-<timestamp>`). If the branch isn't in the report, query it: `gh pr view <n> --json headRefName,headRepository` (GitHub) or `az repos pr show --id <n>` (Azure DevOps). Locate the local clone for that repo.
+2. **Reuse or create the worktree.** Run `git worktree list` in the clone. If a worktree is already checked out to the PR's branch, use it. Otherwise create one (e.g. under the repo's `.worktrees/`) checked out to the existing branch:
+   ```bash
+   git -C <clone> worktree add <clone>/.worktrees/<short-name> <pr-branch>
+   ```
+   Use the existing branch - do **not** create a new branch (that would detach the fixes from the PR). If the branch isn't present locally, fetch it first (`git -C <clone> fetch <remote> <pr-branch>`).
+3. **Confirm before edits.** State in chat which worktree path and branch you're operating in, and verify `git -C <worktree> status` is on the expected branch. If the branch can't be determined or no matching clone exists, stop and ask the user rather than guessing.
+4. Make all subsequent edits inside that worktree path.
+
+### 4. Action the items you agreed with
+
+Make the actual code changes **inside the worktree from step 3**. Use the usual tools (`Edit`, `Write`, `Bash`). Keep changes scoped to what the feedback asked for — don't bundle in unrelated refactors. If a change requires a decision the user should make (e.g. naming, public API shape), pause and ask via `AskUserQuestion` before proceeding.
+
+### 5. Report back in the structured format
 
 Compose a markdown report in **exactly this shape**:
 
@@ -70,7 +106,7 @@ Rules:
 - If everything was actioned, render the "Not actioned" section as `_(nothing declined)_`. If nothing was actioned, render the "Actioned" section as `_(nothing actioned)_`.
 - Skip "Green flags" items entirely — they're not actionable.
 
-### 5. Output + copy to clipboard
+### 6. Output + copy to clipboard
 
 1. Print the full markdown report to chat so the user can see it.
 2. Pipe the same report through `pbcopy` so it's on the clipboard, ready to paste back into the `/review-pr` chat:
