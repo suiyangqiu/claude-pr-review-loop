@@ -25,11 +25,12 @@ TEMPLATE = SKILL_DIR / "report-template.html"
 # Buckets ARE the severity tiers. The verdict is derived from the worst-populated
 # negative tier (see SKILL.md Step 6): any Blocking -> changes/reject; else any
 # Material -> minor; else (only Optional / Green) -> merge. Green never gates.
+# Fields: json key, css/tier class, section heading, short row-tag label.
 BUCKET_DEFS = [
-    ("blocking", "blocking", "Blocking"),
-    ("material", "material", "Material"),
-    ("optional", "optional", "Optional"),
-    ("green",    "green",    "Green Flags"),
+    ("blocking", "blocking", "Blocking",    "Block"),
+    ("material", "material", "Material",    "Matl"),
+    ("optional", "optional", "Optional",    "Opt"),
+    ("green",    "green",    "Green Flags", "Good"),
 ]
 
 
@@ -148,72 +149,101 @@ def e(v):
     return html.escape(str(v))
 
 
-def finding_li(item, with_src):
+def finding_row(item, tier, tag, with_src):
+    """One issue-tracker row: severity tag | label + body | source + location."""
     label = e(item.get("label", "")).strip()
     body = e(item.get("body", "")).strip()
     loc = item.get("loc", "")
     src = item.get("src", "")
+    label_html = f'<span class="label">{label}</span>' if label else ""
+    text_html = f'<div class="text">{body}</div>' if body else ""
     src_html = f'<span class="src">{e(src)}</span>' if (with_src and src) else ""
-    strong = f"<strong>{label}</strong> " if label else ""
-    loc_html = f' <code>{e(loc)}</code>' if loc else ""
-    return f"<li>{src_html}{strong}{body}{loc_html}</li>"
+    loc_html = f'<span class="loc">{e(loc)}</span>' if loc else ""
+    aside = f'<div class="aside">{src_html}{loc_html}</div>' if (src_html or loc_html) else ""
+    return (f'<div class="frow"><span class="tag {tier}">{tag}</span>'
+            f'<div class="content">{label_html}{text_html}</div>{aside}</div>')
 
 
-def build_header(syn):
+def build_sidebar_head(syn):
     pr, v = syn["pr"], syn["verdict"]
     return (
-        "<header>"
-        f'<div class="verdict {e(v["class"])}">{e(v["text"])}</div>'
+        '<div>'
+        '<div class="eyebrow">PR Review</div>'
         f'<h1>{e(pr["title"])}</h1>'
-        '<p class="meta">'
-        f'<a href="{e(pr["url"])}" target="_blank" rel="noopener">{e(pr["repo"])}#{e(pr["number"])}</a>'
-        ' <span class="sep">·</span> by '
-        f'<strong>{e(pr["author"])}</strong>'
-        ' <span class="sep">·</span> '
+        '<div class="repo">'
+        f'<a href="{e(pr["url"])}" target="_blank" rel="noopener">{e(pr["repo"])}#{e(pr["number"])}</a><br>'
+        f'by <strong>{e(pr["author"])}</strong> · '
         f'<span style="color: var(--green);">+{e(pr["additions"])}</span>'
-        f' / <span style="color: var(--red);">-{e(pr["deletions"])}</span>'
-        f' across {e(pr["files"])} files'
-        ' <span class="sep">·</span> '
+        f'/<span style="color: var(--blocking);">-{e(pr["deletions"])}</span>'
+        f' · {e(pr["files"])} files<br>'
         f'<code>{e(pr["head_ref"])}</code> &rarr; <code>{e(pr["base_ref"])}</code>'
-        f' <span class="ci-badge">CI: {e(pr["ci_status"])}</span>'
-        "</p></header>"
+        f' · CI {e(pr["ci_status"])}'
+        '</div>'
+        '</div>'
+        f'<div class="vbadge {e(v["class"])}"><span class="dot"></span>{e(v["text"])}</div>'
     )
 
 
-def section_open(cls, heading, count):
-    count_html = f' <span class="count">{count}</span>' if count else ""
-    return f'<section class="{cls}"><h2>{heading}{count_html}</h2><ul class="findings">'
+def build_meters(syn):
+    """Per-severity count meters for the sidebar. Bars are scaled to the busiest tier."""
+    buckets = syn.get("buckets", {})
+    counts = {key: len(buckets.get(key) or []) for key, _, _, _ in BUCKET_DEFS}
+    mx = max(counts.values()) or 1
+    parts = ['<div class="meters"><div class="mhead">Findings</div>']
+    for key, tier, heading, _ in BUCKET_DEFS:
+        c = counts[key]
+        width = round(c / mx * 100)
+        parts.append(
+            f'<a class="meter {tier}" href="#g-{tier}">'
+            f'<div class="row"><span class="swatch"></span>'
+            f'<span class="mlabel">{heading}</span><span class="mnum">{c}</span></div>'
+            f'<div class="track"><div class="fill" style="width: {width}%"></div></div>'
+            '</a>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def group_open(tier, heading, count, pre=""):
+    count_html = (f' <span class="count">{count} finding{"" if count == 1 else "s"}</span>'
+                  if count else "")
+    pre_html = f'<span class="pre">{pre}</span> ' if pre else ""
+    return (f'<div class="group {tier}" id="g-{tier}">'
+            f'<h2><span class="swatch"></span>{pre_html}{heading}{count_html}</h2>'
+            '<div class="rows">')
 
 
 def build_synthesis_panel(syn):
     v = syn["verdict"]
     parts = ['<div class="panel" id="panel-synthesis">']
 
-    for key, cls, heading in (("pushback", "pushback", "Pushback on declined items"),
-                              ("callouts", "callouts", "Reviewer notes")):
+    parts.append(
+        '<div class="verdict-banner"><span class="label">Verdict rationale</span>'
+        f'<p>{e(v["rationale"])}</p></div>'
+    )
+    parts.append(
+        '<div class="purpose"><span class="label">What this PR does</span>'
+        f'<p>{e(v["purpose"])}</p></div>'
+    )
+
+    for key, tier, heading, tag, pre in (
+            ("pushback", "pushback", "Pushback on declined items", "Push", "Re-review"),
+            ("callouts", "callouts", "Reviewer notes", "Note", "Reviewer note")):
         items = syn.get(key) or []
         if items:
-            parts.append(section_open(cls, heading, len(items)))
-            parts += [finding_li(it, with_src=False) for it in items]
-            parts.append("</ul></section>")
-
-    parts.append(
-        f'<div class="rationale"><div class="label">Verdict rationale</div>{e(v["rationale"])}</div>'
-    )
-    parts.append(
-        '<div class="purpose"><div class="label">What this PR does</div>'
-        f'<p class="purpose-text">{e(v["purpose"])}</p></div>'
-    )
+            parts.append(group_open(tier, heading, len(items), pre=pre))
+            parts += [finding_row(it, tier, tag, with_src=False) for it in items]
+            parts.append("</div></div>")
 
     buckets = syn.get("buckets", {})
-    for key, cls, heading in BUCKET_DEFS:
+    for key, tier, heading, tag in BUCKET_DEFS:
         items = buckets.get(key) or []
-        parts.append(section_open(cls, heading, len(items)))
+        parts.append(group_open(tier, heading, len(items)))
         if items:
-            parts += [finding_li(it, with_src=True) for it in items]
+            parts += [finding_row(it, tier, tag, with_src=True) for it in items]
         else:
-            parts.append('<li class="none">None.</li>')
-        parts.append("</ul></section>")
+            parts.append('<div class="empty">None.</div>')
+        parts.append("</div></div>")
 
     parts.append("</div>")
     return "".join(parts)
@@ -235,7 +265,7 @@ def load_roster():
 
 
 def build_agent_panels(report_dir, roster):
-    """Return (tab_buttons_html, panels_html) for every report present on disk."""
+    """Return (nav_buttons_html, panels_html) for every report present on disk."""
     reports_dir = report_dir / "reports"
     present = []
     if reports_dir.is_dir():
@@ -247,20 +277,21 @@ def build_agent_panels(report_dir, roster):
                             rf.read_text(encoding="utf-8")))
     present.sort(key=lambda x: (x[0], x[1]))
 
-    tabs, panels = [], []
+    nav, panels = [], []
     for _, slug, meta, body in present:
-        tabs.append(
-            f'<button class="tab" data-panel="panel-{e(slug)}">{meta["emoji"]} {e(meta["name"])}</button>'
+        nav.append(
+            f'<button class="nlink" data-panel="panel-{e(slug)}">'
+            f'<span class="ic">{meta["emoji"]}</span>{e(meta["name"])}</button>'
         )
         role = e(meta.get("role", "")).strip()
-        role_html = f'<span class="role">· {role}</span>' if role else ""
+        role_html = f'<span class="role">{role}</span>' if role else ""
         panels.append(
             f'<div class="panel agent-report" id="panel-{e(slug)}" hidden>'
             f'<div class="agent-head"><span class="badge">{meta["emoji"]}</span>'
             f'<span class="name">{e(meta["name"])}</span>{role_html}</div>'
             f'<div class="body">{render_markdown(body)}</div></div>'
         )
-    return "\n".join(tabs), "\n".join(panels)
+    return "\n".join(nav), "\n".join(panels)
 
 
 def main():
@@ -270,17 +301,19 @@ def main():
     syn = json.loads((report_dir / "synthesis.json").read_text(encoding="utf-8"))
 
     roster = load_roster()
-    agent_tabs, agent_panels = build_agent_panels(report_dir, roster)
+    agent_nav, agent_panels = build_agent_panels(report_dir, roster)
 
-    tabs = ['<button class="tab active" data-panel="panel-synthesis">⚖️ Synthesis</button>',
-            agent_tabs]
+    nav = ['<button class="nlink active" data-panel="panel-synthesis">'
+           '<span class="ic">⚖️</span>Synthesis</button>',
+           agent_nav]
     panels = [build_synthesis_panel(syn), agent_panels]
 
     out = TEMPLATE.read_text(encoding="utf-8")
     out = out.replace("{{PR_TITLE}}", e(syn["pr"]["title"]))
     out = out.replace("{{VERDICT_CLASS}}", e(syn["verdict"]["class"]))
-    out = out.replace("{{HEADER}}", build_header(syn))
-    out = out.replace("{{TABS}}", "\n".join(t for t in tabs if t))
+    out = out.replace("{{SIDEBAR_HEAD}}", build_sidebar_head(syn))
+    out = out.replace("{{METERS}}", build_meters(syn))
+    out = out.replace("{{NAV}}", "\n".join(n for n in nav if n))
     out = out.replace("{{PANELS}}", "\n".join(p for p in panels if p))
     out = out.replace("{{TIMESTAMP}}", e(syn["pr"].get("timestamp", "")))
 

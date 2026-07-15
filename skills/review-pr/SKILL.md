@@ -168,7 +168,7 @@ The roster is a mix of lenses: doomsayer hunts blocking problems, positive feeds
 
 Then, for both providers:
 4. Read all the subagent reports with the diff open. Where they disagree, use your own judgement.
-5. **Preserve each report verbatim.** In Step 7 you'll write each report to `$REPORT_DIR/reports/<slug>.md` unchanged — assemble.py renders each into its own tab. Don't summarise them away; the tabs are meant to show each agent's own voice.
+5. **Preserve each report verbatim.** In Step 7 you'll write each report to `$REPORT_DIR/reports/<slug>.md` unchanged — assemble.py renders each into its own panel. Don't summarise them away; the panels are meant to show each agent's own voice.
 6. **Re-tier every finding, then derive the verdict from the tiers.** The reviewers each proposed a tier; with the diff open, you make the final call. The three tiers (same definitions the reviewers used):
    - **Blocking** - correctness bug, security hole, data loss, broken build/tests, or an approach that should not merge as-is. Demonstrable harm.
    - **Material** - should be fixed before merge but does not invalidate the approach: a missing test for new logic, a real unhandled edge case, a meaningful maintainability problem, a clear written-rule violation. The author would reasonably be expected to address it.
@@ -184,7 +184,7 @@ Then, for both providers:
    - **Green flags** - the positive reviewer's strongest points you agree with. Never affects the verdict.
    - **Tag every finding with its source reviewer** (the reviewer's `slug`) so the human can trace it back to the tab — this becomes the `src` field in `synthesis.json` (e.g. `architect`, `nitpicker`, `rules`, `doomsayer`, `positive`, `independent`). If you reached a finding by combining reviewers or via your own read, tag it `synthesis`. A reviewer's `feeds` frontmatter is a soft hint for its usual tier, not a rule - tier by actual severity.
 
-Don't pad. Empty buckets are fine (assemble.py renders a single "None" row). A finding raised by a reviewer that you disagree with after reading the diff should be dropped from the buckets (it still lives in that reviewer's tab) - or surfaced as a Callout if the judgement is worth explaining.
+Don't pad. Empty buckets are fine (assemble.py renders a single "None" row). A finding raised by a reviewer that you disagree with after reading the diff should be dropped from the buckets (it still lives in that reviewer's panel) - or surfaced as a Callout if the judgement is worth explaining.
 
 **On "when is it done".** 🟢 means no Blocking and no Material issues remain - NOT that the PR is flawless. A later fresh review (one with no memory of this chat, e.g. the independent reviewer, or a brand-new `/review-pr` run) will almost always surface new Optional-tier nits, because any reviewer asked to find issues will find some. That is expected and is **not** a reason to keep iterating. Once a pass turns up only Optional items, the PR is merge-ready; treat the long tail of nits as the author's discretion, not a gate. Specifically: do **not** promote an Optional nit to Material just because it is the only thing left to flag. The tiers exist precisely so the loop converges instead of finding fresh things to "fix" forever.
 
@@ -204,7 +204,7 @@ mkdir -p "$REPORT_DIR/reports"
 
 **Remember the value of `$REPORT_DIR` for the rest of the chat** — re-review mode (below) re-runs assemble against this same dir.
 
-**7.2 — Write each reviewer's report verbatim.** For every reviewer that ran, write its full markdown report to `$REPORT_DIR/reports/<slug>.md` (use the `Write` tool; `<slug>` is the reviewer's frontmatter slug, e.g. `doomsayer.md`, `rules.md`). Raw markdown, exactly as the subagent returned it — no HTML, no escaping, no trimming. assemble.py renders it. Only reviewers that have a file here get a tab, so this is also how a skipped reviewer simply doesn't appear.
+**7.2 — Write each reviewer's report verbatim.** For every reviewer that ran, write its full markdown report to `$REPORT_DIR/reports/<slug>.md` (use the `Write` tool; `<slug>` is the reviewer's frontmatter slug, e.g. `doomsayer.md`, `rules.md`). Raw markdown, exactly as the subagent returned it — no HTML, no escaping, no trimming. assemble.py renders it. Only reviewers that have a file here get a panel, so this is also how a skipped reviewer simply doesn't appear.
 
 **7.3 — Write `synthesis.json`.** Write `$REPORT_DIR/synthesis.json` with the `Write` tool. Schema:
 
@@ -244,7 +244,7 @@ mkdir -p "$REPORT_DIR/reports"
 Field rules:
 - The four `buckets` keys are exactly `blocking`, `material`, `optional`, `green` - they are the severity tiers plus the positive bucket. (Older `red`/`minor`/`future` keys are gone.)
 - `verdict.class` is one of `verdict-merge` / `verdict-minor` / `verdict-changes` / `verdict-reject`; `verdict.text` is the matching label (`🟢 Approve and merge`, `🟡 Approve with minor changes`, `🟠 Request changes`, `🔴 Reject`). Derive it from the buckets per Step 6: any `blocking` -> `verdict-changes` (or `verdict-reject` if fundamental); else any `material` -> `verdict-minor`; else (only `optional`/`green`) -> `verdict-merge`.
-- Each finding object: `src` (reviewer slug, or `synthesis`), `label` (short bold lead, ends with a period), `body` (one or two sentences), `loc` (a single `file:line` or `""`). assemble.py escapes all of these and renders `loc` as inline code — so put plain text in `label`/`body`, no HTML or markdown.
+- Each finding object: `src` (reviewer slug, or `synthesis`), `label` (short bold lead, ends with a period), `body` (one or two sentences), `loc` (a single `file:line` or `""`). assemble.py escapes all of these and renders `loc` as a location pill beside the row — so put plain text in `label`/`body`, no HTML or markdown.
 - Empty bucket → `[]` (assemble.py renders "None.").
 - `pushback` and `callouts` are arrays of `{label, body, loc}` (no `src`). First-review runs leave both as `[]`. See the Callouts and Re-review sections for when to fill them.
 - No em/en dashes anywhere — regular hyphens.
@@ -256,7 +256,7 @@ python3 ~/.claude/skills/review-pr/assemble.py "$REPORT_DIR"
 open "$REPORT_DIR/report.html"
 ```
 
-assemble.py reads the reviewer roster (for each tab's name/emoji/order/role), every `reports/<slug>.md`, and `synthesis.json`, then writes `report.html`. If it errors (e.g. malformed JSON), fix the input and re-run — don't hand-edit the HTML.
+assemble.py reads the reviewer roster (for each panel's name/emoji/order/role), every `reports/<slug>.md`, and `synthesis.json`, then writes `report.html`. If it errors (e.g. malformed JSON), fix the input and re-run — don't hand-edit the HTML.
 
 Then tell the user, in one or two sentences: the verdict, that the report is open at `<path>` (Synthesis tab plus one tab per reviewer that ran), and to let you know when they're done. Also remind them the report can be fed to `/action-feedback` if they want the author agent to action it.
 
@@ -470,4 +470,4 @@ The **body is the role brief** pasted into the subagent prompt in Step 5 (after 
 - If you couldn't read the local repo (only the diff), say so explicitly in chat before generating the report, and flag it in `verdict.rationale` — the user should know the synthesis is diff-only.
 - The report directory under `~/.cache/review-pr/` is meant to be ephemeral. Don't reuse old ones across separate `/review-pr` invocations. Re-review mode is the only time you overwrite an existing report.
 - The PR worktree under `~/.cache/review-pr/worktrees/` is likewise ephemeral and per-run. Step 8 removes it with `git worktree remove --force`. If a prior run was interrupted and left stale worktrees behind, `git -C <clone> worktree prune` (plus `rm -rf` of the leftover dir) clears them; they share the clone's objects, so removing them never loses data.
-- `assemble.py` and `report-template.html` are stdlib-only / no-build. If you change the report's look, edit the template's CSS; if you change its structure, edit `assemble.py`. The report uses an editorial/print aesthetic (Fraunces + Newsreader + IBM Plex Mono) loaded from Google Fonts, with a system serif/mono fallback if the machine is offline.
+- `assemble.py` and `report-template.html` are stdlib-only / no-build. If you change the report's look, edit the template's CSS; if you change its structure, edit `assemble.py`. The report uses a product-dashboard aesthetic (clean IBM Plex Sans body + IBM Plex Mono meta/code) loaded from Google Fonts, with a system sans/mono fallback if the machine is offline: a fixed left sidebar carries the verdict badge, per-severity meters, and panel nav, while the main pane renders the synthesis (findings as issue-tracker rows) and one panel per reviewer.
