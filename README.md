@@ -14,7 +14,7 @@ The two skills are useful on their own, but they are designed to be run together
 
 ### `/review-pr <pr-url-or-number>`
 
-Reviews a GitHub **or** Azure DevOps PR with a roster of specialist sub-agents that each form an independent view, then synthesizes a single verdict graded by severity tiers. Output is a self-contained, editorial-styled HTML report (a Synthesis tab plus one tab per reviewer) plus an optional `## 🤖 Agent Review` comment it can post to the PR.
+Reviews a GitHub **or** Azure DevOps PR with a roster of specialist sub-agents that each form an independent view, then synthesizes a single verdict graded by severity tiers. Output is a self-contained, editorial-styled HTML report - a Synthesis tab plus one tab per reviewer - for a human to read and act on.
 
 Verdicts are one of:
 
@@ -48,8 +48,8 @@ Paste that output back into the same chat that ran `/review-pr` and the review s
        Re-review mode: re-spawn roster on the new diff ─► fill Pushback for
        declined-but-still-valid items ─► refresh the same report in place
 
-4.  Repeat 2-3 until the verdict is 🟢 / 🟡, then let /review-pr post the
-    synthesized PR comment and clean up.
+4.  Repeat 2-3 until the verdict is 🟢 / 🟡, then let /review-pr
+    wrap up and clean up its worktree + report.
 ```
 
 The review skill deliberately stays **diff-blind** until after the sub-agents have run, so the reviewers form independent views and the final synthesis is not anchored by an early read of the diff.
@@ -119,7 +119,6 @@ Change the `order` value. The Synthesis tab is always first regardless.
 - Paste a `dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<N>` URL and the skill detects the provider automatically.
 - GitHub uses the `gh` CLI. ADO uses the REST API with a short-lived bearer token minted via `az account get-access-token` (the skill walks through this, including a guest-tenant fallback when your account is a guest in the org).
 - ADO has no convenient raw-content API, so a local clone matters more there; the skill fetches both PR commit SHAs into the clone and diffs locally.
-- One intentional asymmetry: the skill **does not post comments** to ADO PRs. It renders the synthesized comment for you to paste in yourself.
 
 The full provider command map (auth, metadata, file list, clone, diff, CI status) is in the "Provider reference" section of [`skills/review-pr/SKILL.md`](skills/review-pr/SKILL.md).
 
