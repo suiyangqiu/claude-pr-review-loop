@@ -24,13 +24,13 @@ There is also a **re-review mode** triggered when `/action-feedback` output is p
 
 ```
 Step 1  Resolve the PR
-Step 2  Pre-flight: locate or clone the repo, surface state warnings
+Step 2  Pre-flight: locate the clone, create an isolated PR worktree
 Step 3  Build project understanding   (no diff read yet)
 Step 4  Clarify with the user         (if anything is genuinely unclear)
 Step 5  Load the reviewer roster + spawn the selected reviewers in PARALLEL
 Step 6  Read the diff yourself + synthesize a verdict
 Step 7  Write reports + synthesis.json, run assemble.py, open the report
-Step 8  Wait for the human; offer to post a comment; clean up
+Step 8  Wait for the human; clean up
 ```
 
 The reviewer roster is **data, not hard-coded**: each reviewer is a file under `~/.claude/skills/review-pr/reviewers/`. The default roster is **doomsayer**, **positive reviewer**, **code-quality nitpicker**, **architect**, **rule stickler**, and **independent reviewer**. They run in parallel and each forms an independent view. The **independent reviewer** is special: it is spawned with NO project context (no agent memory, no external notes/knowledge base, no project brief) so it reviews with genuinely fresh eyes - see Step 5.3 and the "Reviewer roster" section for how that works. See that section near the end for the file format and how to add/disable one.
@@ -59,9 +59,9 @@ If the provider or identifier is ambiguous, ask for the full PR URL before proce
 
 ---
 
-### Step 2: Pre-flight repo check
+### Step 2: Pre-flight - locate the clone, then create an isolated worktree
 
-A reliable review needs the actual source files, not just the diff. Sort out the local clone before going further.
+A reliable review needs the actual source files at the PR's state, not just the diff. The review reads those files from a **dedicated, throwaway git worktree** checked out at the PR head - never from the shared clone's working tree. A worktree is a second working directory backed by the same `.git` object store, so it mirrors the PR's exact state, doesn't disturb whatever branch or uncommitted edits the main clone is on, and can't collide with other agents or worktrees running against the same repo. This is the default for **both providers**.
 
 **2a — Locate the clone.** In order:
 1. Check your notes/memory for a known local path for `<org>/<repo>`, if you keep one
@@ -75,24 +75,25 @@ A reliable review needs the actual source files, not just the diff. Sort out the
 - "I don't have a local clone of `<org>/<repo>`. Want me to clone it?"
 - Options: `~/Documents/<repo>` · `~/code/<repo>` · Skip (review via API only)
 
-If the user picks a location, clone with `gh repo clone <org>/<repo> <chosen-path>`. If they skip, set a flag for Steps 3 and 5: file reads must use `gh api` raw content, and surrounding-file context will be limited.
+If the user picks a location, clone with `gh repo clone <org>/<repo> <chosen-path>` (ADO: the bearer-token `git clone` in the Provider reference). If they **skip**, you can't create a worktree: set an API-only flag for Steps 3 and 5 - GitHub file reads must use `gh api` raw content (ADO has no convenient raw-content API, so context is limited to the diff + PR description) - and skip the rest of Step 2. On ADO a missing clone is a much bigger deal for this reason, so strongly prefer cloning over skipping.
 
-> **Azure DevOps:** clone and fetch via the bearer-token git commands in the Provider reference (a missing clone is a much bigger deal on ADO - there is no convenient raw-content API, so reading files locally is the only good path; strongly prefer cloning over skipping). After locating/cloning, **fetch both PR commits into the clone** (`source` and `target` SHAs from the PR JSON) so the subagents and Step 6 can diff locally without a token.
+**2c — Fetch the PR head into the clone.** A fetch only writes to the shared object store; it never touches the clone's working tree or current branch, so it's safe whatever state the clone is in.
+- **GitHub:**
+  ```bash
+  HEAD_SHA=$(gh pr view <N> --repo <org>/<repo> --json headRefOid -q .headRefOid)
+  git -C <clone> fetch origin pull/<N>/head
+  ```
+- **Azure DevOps:** mint the token, read the PR JSON, and fetch both PR commits per the Provider reference. `sourceSha = lastMergeSourceCommit.commitId`, `targetSha = lastMergeTargetCommit.commitId`.
 
-**2c — If the clone exists, check its state.** From inside the repo:
+**2d — Create the isolated worktree.** Check it out detached at the PR head (`HEAD_SHA` on GitHub, `sourceSha` on ADO) so there's no branch-name collision and it mirrors the PR exactly:
 ```bash
-git -C <clone-path> status --short
-git -C <clone-path> branch --show-current
-git -C <clone-path> rev-parse --abbrev-ref origin/HEAD | sed 's@^origin/@@'
+TS=$(date +%Y%m%d-%H%M%S)
+WT=~/.cache/review-pr/worktrees/<org>-<repo>-<N>-$TS
+mkdir -p ~/.cache/review-pr/worktrees
+git -C <clone> worktree add --detach "$WT" <HEAD_SHA-or-sourceSha>
 ```
 
-Surface as a warning (don't block) if:
-- Current branch is not the default branch, OR
-- `git status --short` has any output (uncommitted changes / untracked files)
-
-Tell the user in one line: e.g. "Heads-up: your clone is on branch `feature/foo` with 3 uncommitted files. Surrounding-file context will reflect that state, not the PR. Want me to `gh pr checkout <N>` first?" — then wait briefly for them to react before continuing.
-
-If they say "just proceed", continue. If they say "checkout the PR", run `gh pr checkout <N> --repo <org>/<repo>` from the clone path (ADO: `git -C <clone> checkout <sourceBranch>` after the token-authed fetch - see Provider reference). Do not stash or modify their working tree silently.
+**Remember `$WT` for the rest of the chat.** Every "read surrounding files" path (Steps 3, 5, 6) points at `$WT`, and Step 8 removes it. Because all reads come from `$WT`, the clone's own branch and uncommitted changes no longer affect the review - there's nothing to warn about or change in the clone's working tree.
 
 ---
 
@@ -102,10 +103,10 @@ Goal: understand the repo as a whole before looking at the change. You're buildi
 
 In parallel where possible:
 - `gh repo view <org>/<repo> --json name,description,defaultBranchRef,languages,topics,url` for high-level metadata (ADO: the repo GET endpoint in the Provider reference - note ADO returns no languages/topics, so lean on reading the actual repo files below)
-- `ls` the repo root and read top-level docs (`README.md`, `CLAUDE.md`/`AGENTS.md`, `package.json`/`pyproject.toml`/`go.mod`, etc.)
+- `ls` the worktree root (`$WT`) and read top-level docs (`README.md`, `CLAUDE.md`/`AGENTS.md`, `package.json`/`pyproject.toml`/`go.mod`, etc.) - read from `$WT`, not the clone, so you see the PR's state
 - If you keep a project knowledge base (a notes vault, a `docs/` folder, etc.), read the relevant project's notes for extra context
-- For larger or unfamiliar codebases, use the Explore subagent (breadth: "medium") to map structure
-- If Step 2 left you without a local clone, fall back to `gh api` raw content for README + obvious config files (ADO has no convenient raw-content equivalent - if there's no clone, say so and keep context to the diff + PR description)
+- For larger or unfamiliar codebases, use the Explore subagent (breadth: "medium") to map structure (point it at `$WT`)
+- If Step 2 left you API-only (no clone/worktree), fall back to `gh api` raw content for README + obvious config files (ADO has no convenient raw-content equivalent - if there's no clone, say so and keep context to the diff + PR description)
 
 By the end of this step you should be able to answer, in your own words:
 - What is this project for, in one sentence?
@@ -133,9 +134,9 @@ If anything is genuinely ambiguous after Step 3 (unfamiliar stack, undocumented 
 
 **Shared envelope** (prepend to every reviewer's role brief, verbatim intent):
 - The PR identifier (`<org>/<repo>#<N>`) and URL
-- The local clone path (so they can read surrounding files), or a note that no clone is available
+- The worktree path `$WT` (a detached checkout of the PR head, isolated from any other work - tell them to read surrounding files there), or a note that no clone/worktree is available (API-only)
 - Your Step 3-4 project understanding (paste it; don't paraphrase to one line). **EXCEPTION - the independent reviewer:** if the reviewer's file has `independent: true` in its frontmatter, do NOT paste your project understanding and do NOT hand it any agent memory, external notes, or knowledge-base context. Instead tell it plainly: "No project brief is provided on purpose. Build your own understanding from the repo (you may read the diff, the source, and in-repo docs like README/CLAUDE.md), but do not consult any external notes, memory, or vault." Its file body already states the cold-eyes constraints; the envelope just withholds the context the others get.
-- An explicit instruction to fetch the diff themselves and read surrounding files in the local clone where useful. **GitHub:** tell them to run `gh pr view` + `gh pr diff`. **Azure DevOps:** subagents can't use `gh` and shouldn't juggle tokens - instead give them the clone path plus the two commit SHAs (`target` and `source` from the PR JSON, already fetched into the clone in Step 2) and tell them to run the merge-base (three-dot) diff `git -C <clone> diff <targetSha>...<sourceSha>` for the diff. **Use three dots, not two** - a two-dot `diff <targetSha> <sourceSha>` includes target-branch commits the feature lacks (reversed) whenever the branch is behind its target, polluting the diff; the three-dot form diffs from the merge-base so it shows only what the PR introduces. This keeps you (main agent) diff-blind until Step 6 while still letting each reviewer self-serve.
+- An explicit instruction to fetch the diff themselves and read surrounding files in the local clone where useful. **GitHub:** tell them to run `gh pr view` + `gh pr diff`. **Azure DevOps:** subagents can't use `gh` and shouldn't juggle tokens - instead give them the worktree path `$WT` plus the two commit SHAs (`target` and `source` from the PR JSON, already fetched into the shared object store in Step 2) and tell them to run the merge-base (three-dot) diff `git -C $WT diff <targetSha>...<sourceSha>` for the diff (the worktree shares objects with the clone, so this resolves both SHAs). **Use three dots, not two** - a two-dot `diff <targetSha> <sourceSha>` includes target-branch commits the feature lacks (reversed) whenever the branch is behind its target, polluting the diff; the three-dot form diffs from the merge-base so it shows only what the PR introduces. This keeps you (main agent) diff-blind until Step 6 while still letting each reviewer self-serve.
 - **Severity tiering (every reviewer).** Tell each reviewer to assign one tier to every issue it raises, with a one-line justification:
   - **Blocking** - a correctness bug, security hole, data loss, broken build/tests, or an approach that should not merge as-is. Concrete, demonstrable harm.
   - **Material** - should be fixed before merge but does not invalidate the approach: a missing test for new logic, a real unhandled edge case, a meaningful maintainability problem, a clear written-rule violation.
@@ -162,7 +163,7 @@ The roster is a mix of lenses: doomsayer hunts blocking problems, positive feeds
 
 **Azure DevOps** (see Provider reference for the exact commands):
 1. The PR GET endpoint for metadata (title, description, status, isDraft, createdBy, source/target refs, the two merge-commit SHAs).
-2. `git -C <clone> diff <targetSha>...<sourceSha>` for the diff (three-dot / merge-base, same command the subagents used - see the note in the Diff row of the Provider reference).
+2. `git -C $WT diff <targetSha>...<sourceSha>` for the diff (three-dot / merge-base, same command the subagents used - see the note in the Diff row of the Provider reference).
 3. The policy-evaluations endpoint for CI/branch-policy status - it's optional and can be fiddly (needs the project GUID); if it doesn't resolve cleanly, set `ci_status` to `"unknown"` and move on rather than blocking the review.
 
 Then, for both providers:
@@ -261,59 +262,16 @@ Then tell the user, in one or two sentences: the verdict, that the report is ope
 
 ---
 
-### Step 8: Wait for the human, then offer to post + clean up
+### Step 8: Wait for the human, then clean up
 
 The user will come back when they've finished their own review (signals: "done", "finished", "all good", "you can clean up", etc.).
 
-When they do:
-
-1. **Offer to post a synthesized comment.**
-   - **GitHub** - ask exactly:
-     > Would you like me to post a synthesized `## 🤖 Agent Review` comment on the PR before I clean up?
-   - **Azure DevOps** - comment-posting is intentionally not wired for ADO. Instead say:
-     > Heads-up: I don't post comments on Azure DevOps PRs. I can render the synthesized `## 🤖 Agent Review` comment here for you to paste into the PR yourself - want that?
-
-2. **If yes**, render the comment in the format below and show it in chat. **GitHub:** ask for confirmation, then post:
-   ```bash
-   gh pr comment <N> --repo <org>/<repo> --body "$(cat <<'EOF'
-   <the rendered review>
-   EOF
-   )"
-   ```
-   **Azure DevOps:** just print the rendered comment in a copy-friendly block - do not attempt to post it.
-
-3. **Always clean up**, even if they declined the comment:
-   ```bash
-   rm -rf "$REPORT_DIR"
-   ```
-   Confirm cleanup to the user in one line.
-
-#### Comment format (Step 8 only)
-
-```markdown
-## 🤖 Agent Review
-### 🚨 Must Fix / Address
-- ✌️ **None** - <reason> _(or real items if any Blocking items held up merge)_
-
-### ⚠️ Notable Changes
-- <emoji> **<bold label>** - <one or two sentences>
-- **<bold label>** - <one or two sentences>
-
-### 📞 Callouts
-- **<bold label>** - <one or two sentences>
-
-### 🤏 Small Feedback
-- **<bold label>** - <one or two sentences>
+When they do, **clean up** - remove both the report dir and the isolated worktree:
+```bash
+git -C <clone> worktree remove --force "$WT"   # skip if API-only (no worktree was created)
+rm -rf "$REPORT_DIR"
 ```
-
-Formatting rules (strict):
-1. One emoji per section, on the most important bullet only. Other bullets in the section have no leading emoji.
-2. For "Must Fix" with nothing to block merge, the lone "None" bullet gets ✌️.
-3. One or two sentences per bullet, no paragraphs.
-4. No blank lines between bullets within a section.
-5. No em dashes anywhere — use a regular hyphen.
-6. No `Made by @<user>` footer in the comment — the user adds that themselves.
-7. Map the severity tiers to sections: **Blocking -> Must Fix / Address**, **Material -> Notable Changes**, **Optional -> Small Feedback**; Callouts stay in Callouts. If there are no Blocking items (verdict 🟢 or 🟡), the Must Fix section is just the ✌️ None bullet.
+`worktree remove` detaches it cleanly and leaves the shared clone untouched. If it complains the worktree is missing/already gone, run `git -C <clone> worktree prune` and move on. Confirm cleanup to the user in one line.
 
 ---
 
@@ -355,6 +313,8 @@ After a `/review-pr` run, the user may paste the output of `/action-feedback` ba
 
 When you see this **in the same chat** that already ran `/review-pr` (i.e. you still have the original verdict, the subagent reports, and `$REPORT_DIR` in your context), treat it as a re-review trigger. Don't ask whether to proceed — just go.
 
+> **MANDATORY — never re-verdict without re-spawning the roster.** A re-review verdict is valid **only** if it is derived from a fresh, parallel re-spawn of the reviewer subagents (Step 2 below). You (the main agent) reading the actioned diff, running the tests, and judging the items yourself is **not** a substitute and never has been — no matter how small, surgical, or "obviously fine" the delta looks, no matter that you already verified it, no matter the token cost. The whole point of the roster is independent views you do not pre-empt; collapsing that into your own read is exactly the failure this rule exists to stop. Your own verification is *additional* signal you fold in at Step 3+, not a replacement for the re-spawn. If you are about to write a new verdict and you have **not** issued the Step-2 `Agent` calls in this turn, STOP and issue them first. The only case where you may skip the re-spawn is if the user **explicitly** tells you to (e.g. "just eyeball it yourself, don't re-run the agents") — and then you must say plainly in the report that the verdict is your own read, not a roster re-review.
+
 ### Re-review flow
 
 1. **Fetch fresh PR state** — the head ref likely has new commits:
@@ -363,17 +323,25 @@ When you see this **in the same chat** that already ran `/review-pr` (i.e. you s
    gh pr diff <N> --repo <org>/<repo>
    gh pr checks <N> --repo <org>/<repo>
    ```
-   If the clone is on the PR branch, `git -C <clone-path> pull` to sync.
+   Then move the worktree to the new head so surrounding-file reads stay current:
+   ```bash
+   NEW_SHA=$(gh pr view <N> --repo <org>/<repo> --json headRefOid -q .headRefOid)
+   git -C <clone> fetch origin pull/<N>/head
+   git -C "$WT" checkout --detach "$NEW_SHA"
+   ```
+   If `$WT` is no longer in your context (e.g. the conversation was compacted), recreate it per Step 2 first.
 
-   **Azure DevOps:** re-hit the PR GET endpoint for the new merge-commit SHAs, re-fetch both into the clone with the token-authed `git fetch` (Provider reference), then `git -C <clone> diff <newTargetSha>...<newSourceSha>` (three-dot / merge-base). The SHAs move between iterations, so always re-read them from the fresh PR JSON rather than reusing the first pass's.
+   **Azure DevOps:** re-hit the PR GET endpoint for the new merge-commit SHAs, re-fetch both into the clone with the token-authed `git fetch` (Provider reference), move the worktree with `git -C "$WT" checkout --detach <newSourceSha>`, then `git -C "$WT" diff <newTargetSha>...<newSourceSha>` (three-dot / merge-base). The SHAs move between iterations, so always re-read them from the fresh PR JSON rather than reusing the first pass's.
 
-2. **Re-spawn the same roster in parallel** (the same reviewers that ran the first time — respect any earlier skips, and any new skip the user voices now). Rebuild each prompt as the shared envelope + that reviewer's file body (the independent reviewer's envelope still withholds project context per Step 5.3; it may see its own prior report, just not external context), plus four extra inputs:
+   **If the PR head is unchanged** (the actioned edits were made but not yet committed/pushed — common when `/action-feedback` ran against a local worktree), the changes live as **uncommitted edits in the author's working tree**, not on the PR head. Locate that worktree (check memory / `git worktree list` in the clone for the PR's source branch), and have the reviewers diff there instead: the full current feature is `git -C <author-worktree> diff <targetSha> -- <changed-paths>` (working tree vs base, path-scoped so it's safe) and the actioned-only delta is `git -C <author-worktree> diff -- <changed-paths>` (working tree vs HEAD). Flag in a **callout** that the verdict reviewed un-pushed local edits and the author must commit + push before CI/merge. Do **not** silently fall back to your own read just because the PR head didn't move — that does not waive the re-spawn rule above.
+
+2. **Re-spawn the same roster in parallel — this step is non-negotiable (see the MANDATORY note above).** Same reviewers that ran the first time (respect any earlier skips, and any new skip the user voices now). Rebuild each prompt as the shared envelope + that reviewer's file body (the independent reviewer's envelope still withholds project context per Step 5.3; it may see its own prior report, just not external context), plus four extra inputs:
    - That reviewer's own original report from the first pass (the doomsayer gets the doomsayer report, the architect gets the architect report, etc.)
    - The `/action-feedback` output (Actioned + Not actioned)
    - The fresh diff
    - An explicit instruction: "For each 'Not actioned' item in your domain, decide whether you still agree the change was warranted. If yes, list it as **pushback** with reasoning. Also reassess your original points against the new diff — drop anything that's now addressed."
 
-3. **Re-read the fresh diff yourself** with all the new reports in hand.
+3. **Re-read the fresh diff yourself** with all the new reports in hand. This is where your own verification (reading the diff, running the tests) belongs — as a cross-check layered on top of the reports, never instead of them. If you skipped Step 2, you are not at Step 3; go back and re-spawn.
 
 4. **Identify Pushback items** — these are items where:
    - The action-feedback agent declined to make a change, AND
@@ -399,7 +367,7 @@ When you see this **in the same chat** that already ran `/review-pr` (i.e. you s
    ```
    Tell the user one or two sentences: the new verdict, any pushback / callouts count, and that the report has been refreshed.
 
-8. **Continue with Step 8** (wait for "done", offer to post comment, clean up) when the user is finished.
+8. **Continue with Step 8** (wait for "done", clean up) when the user is finished.
 
 If `$REPORT_DIR` is no longer in your context (e.g. the conversation was compacted), create a fresh timestamped directory under `~/.cache/review-pr/` like a normal run.
 
@@ -435,11 +403,11 @@ Keep the token in a shell variable only - **never write it to a file**. Use it i
 | **PR metadata** (3, 6, re-review) | `gh pr view ... --json ...` | `curl -s -H "Authorization: Bearer $TOKEN" "$BASE/pullRequests/$N?api-version=7.1"` |
 | **File list** (3) | `gh pr view --json files` | `curl -s -H "Authorization: Bearer $TOKEN" "$BASE/pullRequests/$N/iterations?api-version=7.1"` -> take the latest iteration id, then `.../pullRequests/$N/iterations/<id>/changes?api-version=7.1` |
 | **Clone** (2) | `gh repo clone $O/$R <path>` | `git -c http.extraHeader="Authorization: Bearer $TOKEN" clone "https://dev.azure.com/$O/$P/_git/$R" <path>` |
-| **Fetch PR commits** (2) | (n/a - `gh pr checkout`) | `git -C <clone> -c http.extraHeader="Authorization: Bearer $TOKEN" fetch origin <sourceBranch> <targetBranch>` (branch names = `sourceRefName`/`targetRefName` minus `refs/heads/`) |
-| **Diff** (5 subagents, 6) | `gh pr diff $N` | `git -C <clone> diff <targetSha>...<sourceSha>` (THREE dots) where `targetSha=lastMergeTargetCommit.commitId`, `sourceSha=lastMergeSourceCommit.commitId` from the PR JSON. Three-dot diffs from the merge-base, so it shows only the PR's changes; a two-dot `diff <targetSha> <sourceSha>` is WRONG when the branch is behind its target (it folds in target-ahead commits, reversed) and can balloon the file count. |
+| **Fetch PR commits** (2c) | `git -C <clone> fetch origin pull/$N/head` (head SHA = `gh pr view $N --json headRefOid -q .headRefOid`) | `git -C <clone> -c http.extraHeader="Authorization: Bearer $TOKEN" fetch origin <sourceBranch> <targetBranch>` (branch names = `sourceRefName`/`targetRefName` minus `refs/heads/`) |
+| **Worktree** (2d) | `git -C <clone> worktree add --detach "$WT" <HEAD_SHA>` | `git -C <clone> worktree add --detach "$WT" <sourceSha>` (`sourceSha=lastMergeSourceCommit.commitId`). Detached so it never collides with a branch checked out elsewhere. Remove in Step 8 with `git -C <clone> worktree remove --force "$WT"`. |
+| **Diff** (5 subagents, 6) | `gh pr diff $N` | `git -C "$WT" diff <targetSha>...<sourceSha>` (THREE dots) where `targetSha=lastMergeTargetCommit.commitId`, `sourceSha=lastMergeSourceCommit.commitId` from the PR JSON. Three-dot diffs from the merge-base, so it shows only the PR's changes; a two-dot `diff <targetSha> <sourceSha>` is WRONG when the branch is behind its target (it folds in target-ahead commits, reversed) and can balloon the file count. |
 | **CI / checks** (6) | `gh pr checks $N` | *optional* - branch-policy evaluations: `curl -s -H "Authorization: Bearer $TOKEN" "https://dev.azure.com/$O/$P/_apis/policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<projectId>/$N&api-version=7.1"`. Needs `<projectId>` (= `repository.project.id` from the PR JSON). If it doesn't resolve, set `ci_status` to `"unknown"`. |
 | **Repo metadata** (3) | `gh repo view ... --json ...` | `curl -s -H "Authorization: Bearer $TOKEN" "$BASE?api-version=7.1"` (name, defaultBranch, webUrl; no languages/topics) |
-| **Post comment** (8) | `gh pr comment` | **Not supported** - render the comment for manual paste; never post. |
 
 ### Mapping the ADO PR JSON to `synthesis.json`
 
@@ -501,4 +469,5 @@ The **body is the role brief** pasted into the subagent prompt in Step 5 (after 
 - Don't restate the PR description in the report. The author wrote it; reflect it back only as one sentence in `verdict.purpose` in `synthesis.json`.
 - If you couldn't read the local repo (only the diff), say so explicitly in chat before generating the report, and flag it in `verdict.rationale` — the user should know the synthesis is diff-only.
 - The report directory under `~/.cache/review-pr/` is meant to be ephemeral. Don't reuse old ones across separate `/review-pr` invocations. Re-review mode is the only time you overwrite an existing report.
+- The PR worktree under `~/.cache/review-pr/worktrees/` is likewise ephemeral and per-run. Step 8 removes it with `git worktree remove --force`. If a prior run was interrupted and left stale worktrees behind, `git -C <clone> worktree prune` (plus `rm -rf` of the leftover dir) clears them; they share the clone's objects, so removing them never loses data.
 - `assemble.py` and `report-template.html` are stdlib-only / no-build. If you change the report's look, edit the template's CSS; if you change its structure, edit `assemble.py`. The report uses an editorial/print aesthetic (Fraunces + Newsreader + IBM Plex Mono) loaded from Google Fonts, with a system serif/mono fallback if the machine is offline.
